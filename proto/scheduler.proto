@@ -1,0 +1,186 @@
+syntax = "proto3";
+
+package scheduler;
+
+option go_package = "github.com/Kulnoorbajwa/distributed-scheduler/proto";
+
+// ─────────────────────────────────────────
+// Shared message types
+// ─────────────────────────────────────────
+
+message Job {
+  string id            = 1;
+  string request_id    = 2;
+  string tenant_id     = 3;
+  string status        = 4;
+  string priority      = 5;
+  string payload       = 6;
+  int32  max_retries   = 7;
+  int32  retry_count   = 8;
+  string last_error    = 9;
+  int32  lease_version = 10;
+  int64  run_timeout_ms = 11;
+}
+
+message Worker {
+  string id         = 1;
+  string tenant_id  = 2;
+  string address    = 3;
+  int32  max_jobs   = 4;
+  int32  cpu_slots  = 5;
+  int32  memory_mb  = 6;
+  string version    = 7;
+}
+
+// ─────────────────────────────────────────
+// Worker → Scheduler messages
+// ─────────────────────────────────────────
+
+message RegisterRequest {
+  Worker worker = 1;
+}
+
+message RegisterResponse {
+  bool   success    = 1;
+  string worker_id  = 2;
+  string message    = 3;
+}
+
+message HeartbeatRequest {
+  string worker_id   = 1;
+  int32  active_jobs = 2;
+  string status      = 3;
+}
+
+message HeartbeatResponse {
+  bool   success = 1;
+  string message = 2; // "OK" or "RE_REGISTER" if marked dead
+}
+
+message JobResultRequest {
+  string job_id        = 1;
+  string worker_id     = 2;
+  int32  lease_version = 3;
+  bool   success       = 4;
+  string error_message = 5;
+}
+
+message JobResultResponse {
+  bool   accepted = 1; // false if lease is stale
+  string message  = 2;
+}
+
+message LeaseRenewRequest {
+  string job_id        = 1;
+  string worker_id     = 2;
+  int32  lease_version = 3;
+}
+
+message LeaseRenewResponse {
+  bool   success       = 1;
+  int64  new_expiry_ms = 2; // new expiry as unix ms
+  string message       = 3;
+}
+
+// ─────────────────────────────────────────
+// Scheduler → Worker messages
+// ─────────────────────────────────────────
+
+message DispatchRequest {
+  Job    job          = 1;
+  string lease_id     = 2;
+  int32  lease_version = 3;
+}
+
+message DispatchResponse {
+  bool   accepted = 1;
+  string message  = 2;
+}
+
+message CancelJobRequest {
+  string job_id    = 1;
+  string worker_id = 2;
+}
+
+message CancelJobResponse {
+  bool   success = 1;
+  string message = 2;
+}
+
+// ─────────────────────────────────────────
+// Client → Scheduler messages
+// ─────────────────────────────────────────
+
+message SubmitJobRequest {
+  string request_id    = 1; // idempotency key
+  string tenant_id     = 2;
+  string priority      = 3;
+  string payload       = 4;
+  int32  max_retries   = 5;
+  int64  run_timeout_ms = 6;
+}
+
+message SubmitJobResponse {
+  bool   success = 1;
+  string job_id  = 2;
+  string message = 3;
+}
+
+message GetJobRequest {
+  string job_id    = 1;
+  string tenant_id = 2;
+}
+
+message GetJobResponse {
+  Job    job     = 1;
+  bool   found   = 2;
+  string message = 3;
+}
+
+message CancelJobClientRequest {
+  string job_id    = 1;
+  string tenant_id = 2;
+}
+
+message CancelJobClientResponse {
+  bool   success = 1;
+  string message = 2;
+}
+
+message ListJobsRequest {
+  string tenant_id = 1;
+  string status    = 2; // optional filter
+  int32  limit     = 3;
+  int32  offset    = 4;
+}
+
+message ListJobsResponse {
+  repeated Job jobs    = 1;
+  int32        total   = 2;
+  string       message = 3;
+}
+
+// ─────────────────────────────────────────
+// Service definitions
+// ─────────────────────────────────────────
+
+// WorkerService — called BY the scheduler ON workers
+service WorkerService {
+  rpc DispatchJob(DispatchRequest)     returns (DispatchResponse);
+  rpc CancelJob(CancelJobRequest)      returns (CancelJobResponse);
+}
+
+// SchedulerService — called BY workers and clients ON the scheduler
+service SchedulerService {
+  // Worker calls
+  rpc RegisterWorker(RegisterRequest)  returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest)      returns (HeartbeatResponse);
+  rpc ReportResult(JobResultRequest)   returns (JobResultResponse);
+  rpc RenewLease(LeaseRenewRequest)    returns (LeaseRenewResponse);
+
+  // Client calls
+  rpc SubmitJob(SubmitJobRequest)      returns (SubmitJobResponse);
+  rpc GetJob(GetJobRequest)            returns (GetJobResponse);
+  rpc CancelJob(CancelJobClientRequest) returns (CancelJobClientResponse);
+  rpc ListJobs(ListJobsRequest)        returns (ListJobsResponse);
+}

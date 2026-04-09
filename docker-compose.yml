@@ -1,0 +1,109 @@
+services:
+
+  # ── PostgreSQL ──
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER:     scheduler
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB:       scheduler
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./internal/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scheduler"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Scheduler (master node) ──
+  scheduler:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.scheduler
+    environment:
+      DATABASE_URL: postgres://scheduler:${POSTGRES_PASSWORD}@postgres:5432/scheduler?sslmode=disable
+      SCHEDULER_PORT: "50051"
+      API_TOKEN:     ${API_TOKEN:?Set API_TOKEN in .env}
+      WORKER_TOKEN:  ${WORKER_TOKEN:?Set WORKER_TOKEN in .env}
+    ports:
+      - "50051:50051"
+      - "9090:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Workers ──
+  worker-1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      WORKER_ID:      a1b2c3d4-0001-4000-8000-000000000001
+      TENANT_ID:      default
+      WORKER_ADDR:    worker-1:50052
+      SCHEDULER_ADDR: scheduler:50051
+      WORKER_TOKEN:   ${WORKER_TOKEN}
+    depends_on:
+      - scheduler
+    restart: unless-stopped
+
+  worker-2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      WORKER_ID:      a1b2c3d4-0002-4000-8000-000000000002
+      TENANT_ID:      default
+      WORKER_ADDR:    worker-2:50052
+      SCHEDULER_ADDR: scheduler:50051
+      WORKER_TOKEN:   ${WORKER_TOKEN}
+    depends_on:
+      - scheduler
+    restart: unless-stopped
+
+  worker-3:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      WORKER_ID:      a1b2c3d4-0003-4000-8000-000000000003
+      TENANT_ID:      default
+      WORKER_ADDR:    worker-3:50052
+      SCHEDULER_ADDR: scheduler:50051
+      WORKER_TOKEN:   ${WORKER_TOKEN}
+    depends_on:
+      - scheduler
+    restart: unless-stopped
+
+  # ── Prometheus (metrics collection) ──
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9091:9090"
+    depends_on:
+      - scheduler
+
+  # ── Grafana (metrics dashboard) ──
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./docker/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards
+
+volumes:
+  postgres_data:
+  grafana_data:

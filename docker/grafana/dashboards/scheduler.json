@@ -1,0 +1,218 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Active Workers",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "green", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "scheduler_workers_active", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Jobs Submitted (total)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(scheduler_jobs_submitted_total)", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Jobs Succeeded",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } }, "overrides": [] },
+      "targets": [
+        { "expr": "scheduler_jobs_completed_total{outcome=\"succeeded\"}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Jobs Failed",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "red" } }, "overrides": [] },
+      "targets": [
+        { "expr": "scheduler_jobs_completed_total{outcome=\"failed\"}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Workers Reaped (dead)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] },
+      "targets": [
+        { "expr": "scheduler_workers_reaped_total", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Jobs Reclaimed",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "purple" } }, "overrides": [] },
+      "targets": [
+        { "expr": "scheduler_jobs_reclaimed_total", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Job Dispatch Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20, "pointSize": 5 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(scheduler_jobs_submitted_total[1m])", "legendFormat": "submitted/s ({{priority}})", "refId": "A" },
+        { "expr": "rate(scheduler_jobs_dispatched_total[1m])", "legendFormat": "dispatched/s", "refId": "B" },
+        { "expr": "rate(scheduler_jobs_completed_total[1m])", "legendFormat": "completed/s ({{outcome}})", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Queue Depth by Status",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 30, "stacking": { "mode": "normal" } }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "PENDING" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "RUNNING" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "DISPATCHED" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "FAILED" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "DEAD_LETTER" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [
+        { "expr": "scheduler_job_queue_depth", "legendFormat": "{{status}}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Dispatch Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(scheduler_dispatch_latency_seconds_bucket[5m]))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, rate(scheduler_dispatch_latency_seconds_bucket[5m]))", "legendFormat": "p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, rate(scheduler_dispatch_latency_seconds_bucket[5m]))", "legendFormat": "p99", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Job Duration by Outcome (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(scheduler_job_duration_seconds_bucket[5m]))", "legendFormat": "p50 ({{outcome}})", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, rate(scheduler_job_duration_seconds_bucket[5m]))", "legendFormat": "p95 ({{outcome}})", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, rate(scheduler_job_duration_seconds_bucket[5m]))", "legendFormat": "p99 ({{outcome}})", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Lease Operations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15 }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "renewals/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "rejections/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "reclaimed/s" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [
+        { "expr": "rate(scheduler_lease_renewals_total[1m])", "legendFormat": "renewals/s", "refId": "A" },
+        { "expr": "rate(scheduler_lease_rejections_total[1m])", "legendFormat": "rejections/s", "refId": "B" },
+        { "expr": "rate(scheduler_jobs_reclaimed_total[1m])", "legendFormat": "reclaimed/s", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Fault Tolerance Events",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 80 }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "workers reaped" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "jobs reclaimed" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [
+        { "expr": "increase(scheduler_workers_reaped_total[1m])", "legendFormat": "workers reaped", "refId": "A" },
+        { "expr": "increase(scheduler_jobs_reclaimed_total[1m])", "legendFormat": "jobs reclaimed", "refId": "B" }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["scheduler", "distributed-systems"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Distributed Scheduler",
+  "uid": "distributed-scheduler",
+  "version": 1
+}

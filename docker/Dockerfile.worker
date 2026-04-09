@@ -1,0 +1,29 @@
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+COPY vendor/ vendor/
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -o worker ./worker
+
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata
+
+RUN addgroup -S worker && adduser -S worker -G worker
+
+WORKDIR /app
+
+COPY --from=builder /app/worker .
+COPY docker/scripts/ /app/scripts/
+
+RUN chown -R worker:worker /app
+
+USER worker
+
+EXPOSE 50052
+
+CMD ["./worker"]

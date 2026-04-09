@@ -1,0 +1,28 @@
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+COPY vendor/ vendor/
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -o scheduler ./scheduler
+
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata
+
+RUN addgroup -S scheduler && adduser -S scheduler -G scheduler
+
+WORKDIR /app
+
+COPY --from=builder /app/scheduler .
+
+RUN chown -R scheduler:scheduler /app
+
+USER scheduler
+
+EXPOSE 50051
+
+CMD ["./scheduler"]

@@ -1,0 +1,39 @@
+# Binaries (output in bin/ or root — use path prefix to avoid ignoring source dirs)
+bin/
+*.exe
+/scheduler-bin
+/worker-bin
+/client-bin
+
+# Go
+*.test
+*.out
+vendor/
+
+# Environment / Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+credentials.json
+secrets.yml
+secrets.yaml
+
+# Docker
+docker-compose.override.yml
+docker-compose.*.yml
+!docker-compose.yml
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
