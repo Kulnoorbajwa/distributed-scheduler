@@ -46,6 +46,7 @@ type Job struct {
 	StartedAt      *time.Time
 	CompletedAt    *time.Time
 	RunTimeout     time.Duration
+	RetryAfter     *time.Time
 }
 
 // WorkerStatus represents whether a worker is alive
@@ -81,6 +82,33 @@ type Lease struct {
 	ExpiresAt time.Time
 	CreatedAt time.Time
 	RenewedAt time.Time
+}
+
+// MissedRunPolicy controls what happens when a scheduled run is missed
+type MissedRunPolicy string
+
+const (
+	MissedRunPolicySkip    MissedRunPolicy = "SKIP"
+	MissedRunPolicyRunOnce MissedRunPolicy = "RUN_ONCE"
+	MissedRunPolicyRunAll  MissedRunPolicy = "RUN_ALL"
+)
+
+// Schedule represents a recurring job definition
+type Schedule struct {
+	ID           string
+	TenantID     string
+	Name         string
+	CronExpr     string
+	Payload      string
+	Priority     JobPriority
+	MaxRetries   int
+	RunTimeout   time.Duration
+	Enabled      bool
+	MissedPolicy MissedRunPolicy
+	LastRunAt    *time.Time
+	NextRunAt    time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // JobTransition is an audit log entry for every state change

@@ -36,6 +36,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ── Scheduler standby (HA — competes for leader lock) ──
+  scheduler-standby:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.scheduler
+    environment:
+      DATABASE_URL: postgres://scheduler:${POSTGRES_PASSWORD}@postgres:5432/scheduler?sslmode=disable
+      SCHEDULER_PORT: "50051"
+      API_TOKEN:     ${API_TOKEN}
+      WORKER_TOKEN:  ${WORKER_TOKEN}
+    ports:
+      - "50053:50051"
+      - "9092:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   # ── Workers ──
   worker-1:
     build:

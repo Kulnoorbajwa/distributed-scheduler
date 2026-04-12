@@ -8,7 +8,6 @@ package proto
 
 import (
 	context "context"
-
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -172,6 +171,12 @@ const (
 	SchedulerService_GetJob_FullMethodName         = "/scheduler.SchedulerService/GetJob"
 	SchedulerService_CancelJob_FullMethodName      = "/scheduler.SchedulerService/CancelJob"
 	SchedulerService_ListJobs_FullMethodName       = "/scheduler.SchedulerService/ListJobs"
+	SchedulerService_CreateSchedule_FullMethodName = "/scheduler.SchedulerService/CreateSchedule"
+	SchedulerService_ListSchedules_FullMethodName  = "/scheduler.SchedulerService/ListSchedules"
+	SchedulerService_ToggleSchedule_FullMethodName = "/scheduler.SchedulerService/ToggleSchedule"
+	SchedulerService_DeleteSchedule_FullMethodName = "/scheduler.SchedulerService/DeleteSchedule"
+	SchedulerService_GetAutopsy_FullMethodName     = "/scheduler.SchedulerService/GetAutopsy"
+	SchedulerService_ListAutopsies_FullMethodName  = "/scheduler.SchedulerService/ListAutopsies"
 )
 
 // SchedulerServiceClient is the client API for SchedulerService service.
@@ -190,6 +195,14 @@ type SchedulerServiceClient interface {
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*GetJobResponse, error)
 	CancelJob(ctx context.Context, in *CancelJobClientRequest, opts ...grpc.CallOption) (*CancelJobClientResponse, error)
 	ListJobs(ctx context.Context, in *ListJobsRequest, opts ...grpc.CallOption) (*ListJobsResponse, error)
+	// Schedule calls (recurring jobs)
+	CreateSchedule(ctx context.Context, in *CreateScheduleRequest, opts ...grpc.CallOption) (*CreateScheduleResponse, error)
+	ListSchedules(ctx context.Context, in *ListSchedulesRequest, opts ...grpc.CallOption) (*ListSchedulesResponse, error)
+	ToggleSchedule(ctx context.Context, in *ToggleScheduleRequest, opts ...grpc.CallOption) (*ToggleScheduleResponse, error)
+	DeleteSchedule(ctx context.Context, in *DeleteScheduleRequest, opts ...grpc.CallOption) (*DeleteScheduleResponse, error)
+	// Autopsy calls (dead letter forensics)
+	GetAutopsy(ctx context.Context, in *GetAutopsyRequest, opts ...grpc.CallOption) (*GetAutopsyResponse, error)
+	ListAutopsies(ctx context.Context, in *ListAutopsiesRequest, opts ...grpc.CallOption) (*ListAutopsiesResponse, error)
 }
 
 type schedulerServiceClient struct {
@@ -280,6 +293,66 @@ func (c *schedulerServiceClient) ListJobs(ctx context.Context, in *ListJobsReque
 	return out, nil
 }
 
+func (c *schedulerServiceClient) CreateSchedule(ctx context.Context, in *CreateScheduleRequest, opts ...grpc.CallOption) (*CreateScheduleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateScheduleResponse)
+	err := c.cc.Invoke(ctx, SchedulerService_CreateSchedule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *schedulerServiceClient) ListSchedules(ctx context.Context, in *ListSchedulesRequest, opts ...grpc.CallOption) (*ListSchedulesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSchedulesResponse)
+	err := c.cc.Invoke(ctx, SchedulerService_ListSchedules_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *schedulerServiceClient) ToggleSchedule(ctx context.Context, in *ToggleScheduleRequest, opts ...grpc.CallOption) (*ToggleScheduleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ToggleScheduleResponse)
+	err := c.cc.Invoke(ctx, SchedulerService_ToggleSchedule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *schedulerServiceClient) DeleteSchedule(ctx context.Context, in *DeleteScheduleRequest, opts ...grpc.CallOption) (*DeleteScheduleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteScheduleResponse)
+	err := c.cc.Invoke(ctx, SchedulerService_DeleteSchedule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *schedulerServiceClient) GetAutopsy(ctx context.Context, in *GetAutopsyRequest, opts ...grpc.CallOption) (*GetAutopsyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetAutopsyResponse)
+	err := c.cc.Invoke(ctx, SchedulerService_GetAutopsy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *schedulerServiceClient) ListAutopsies(ctx context.Context, in *ListAutopsiesRequest, opts ...grpc.CallOption) (*ListAutopsiesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAutopsiesResponse)
+	err := c.cc.Invoke(ctx, SchedulerService_ListAutopsies_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SchedulerServiceServer is the server API for SchedulerService service.
 // All implementations must embed UnimplementedSchedulerServiceServer
 // for forward compatibility.
@@ -296,6 +369,14 @@ type SchedulerServiceServer interface {
 	GetJob(context.Context, *GetJobRequest) (*GetJobResponse, error)
 	CancelJob(context.Context, *CancelJobClientRequest) (*CancelJobClientResponse, error)
 	ListJobs(context.Context, *ListJobsRequest) (*ListJobsResponse, error)
+	// Schedule calls (recurring jobs)
+	CreateSchedule(context.Context, *CreateScheduleRequest) (*CreateScheduleResponse, error)
+	ListSchedules(context.Context, *ListSchedulesRequest) (*ListSchedulesResponse, error)
+	ToggleSchedule(context.Context, *ToggleScheduleRequest) (*ToggleScheduleResponse, error)
+	DeleteSchedule(context.Context, *DeleteScheduleRequest) (*DeleteScheduleResponse, error)
+	// Autopsy calls (dead letter forensics)
+	GetAutopsy(context.Context, *GetAutopsyRequest) (*GetAutopsyResponse, error)
+	ListAutopsies(context.Context, *ListAutopsiesRequest) (*ListAutopsiesResponse, error)
 	mustEmbedUnimplementedSchedulerServiceServer()
 }
 
@@ -329,6 +410,24 @@ func (UnimplementedSchedulerServiceServer) CancelJob(context.Context, *CancelJob
 }
 func (UnimplementedSchedulerServiceServer) ListJobs(context.Context, *ListJobsRequest) (*ListJobsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListJobs not implemented")
+}
+func (UnimplementedSchedulerServiceServer) CreateSchedule(context.Context, *CreateScheduleRequest) (*CreateScheduleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateSchedule not implemented")
+}
+func (UnimplementedSchedulerServiceServer) ListSchedules(context.Context, *ListSchedulesRequest) (*ListSchedulesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSchedules not implemented")
+}
+func (UnimplementedSchedulerServiceServer) ToggleSchedule(context.Context, *ToggleScheduleRequest) (*ToggleScheduleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ToggleSchedule not implemented")
+}
+func (UnimplementedSchedulerServiceServer) DeleteSchedule(context.Context, *DeleteScheduleRequest) (*DeleteScheduleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSchedule not implemented")
+}
+func (UnimplementedSchedulerServiceServer) GetAutopsy(context.Context, *GetAutopsyRequest) (*GetAutopsyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAutopsy not implemented")
+}
+func (UnimplementedSchedulerServiceServer) ListAutopsies(context.Context, *ListAutopsiesRequest) (*ListAutopsiesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAutopsies not implemented")
 }
 func (UnimplementedSchedulerServiceServer) mustEmbedUnimplementedSchedulerServiceServer() {}
 func (UnimplementedSchedulerServiceServer) testEmbeddedByValue()                          {}
@@ -495,6 +594,114 @@ func _SchedulerService_ListJobs_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SchedulerService_CreateSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServiceServer).CreateSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SchedulerService_CreateSchedule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServiceServer).CreateSchedule(ctx, req.(*CreateScheduleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SchedulerService_ListSchedules_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSchedulesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServiceServer).ListSchedules(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SchedulerService_ListSchedules_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServiceServer).ListSchedules(ctx, req.(*ListSchedulesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SchedulerService_ToggleSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ToggleScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServiceServer).ToggleSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SchedulerService_ToggleSchedule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServiceServer).ToggleSchedule(ctx, req.(*ToggleScheduleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SchedulerService_DeleteSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteScheduleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServiceServer).DeleteSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SchedulerService_DeleteSchedule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServiceServer).DeleteSchedule(ctx, req.(*DeleteScheduleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SchedulerService_GetAutopsy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAutopsyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServiceServer).GetAutopsy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SchedulerService_GetAutopsy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServiceServer).GetAutopsy(ctx, req.(*GetAutopsyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SchedulerService_ListAutopsies_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAutopsiesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServiceServer).ListAutopsies(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SchedulerService_ListAutopsies_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServiceServer).ListAutopsies(ctx, req.(*ListAutopsiesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SchedulerService_ServiceDesc is the grpc.ServiceDesc for SchedulerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -533,6 +740,30 @@ var SchedulerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListJobs",
 			Handler:    _SchedulerService_ListJobs_Handler,
+		},
+		{
+			MethodName: "CreateSchedule",
+			Handler:    _SchedulerService_CreateSchedule_Handler,
+		},
+		{
+			MethodName: "ListSchedules",
+			Handler:    _SchedulerService_ListSchedules_Handler,
+		},
+		{
+			MethodName: "ToggleSchedule",
+			Handler:    _SchedulerService_ToggleSchedule_Handler,
+		},
+		{
+			MethodName: "DeleteSchedule",
+			Handler:    _SchedulerService_DeleteSchedule_Handler,
+		},
+		{
+			MethodName: "GetAutopsy",
+			Handler:    _SchedulerService_GetAutopsy_Handler,
+		},
+		{
+			MethodName: "ListAutopsies",
+			Handler:    _SchedulerService_ListAutopsies_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -67,4 +67,25 @@ var (
 		Name: "scheduler_lease_rejections_total",
 		Help: "Total rejected lease renewals (stale)",
 	})
+
+	// Leader election metrics
+	leaderIsLeader = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "scheduler_leader_is_leader",
+		Help: "1 if this instance is the leader, 0 if standby",
+	})
+
+	leaderPromotions = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "scheduler_leader_promotions_total",
+		Help: "Total times this instance was promoted to leader",
+	})
+
+	leaderDemotions = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "scheduler_leader_demotions_total",
+		Help: "Total times this instance was demoted from leader",
+	})
+
+	leaderElectionErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "scheduler_leader_election_errors_total",
+		Help: "Total errors during leader election attempts",
+	})
 )

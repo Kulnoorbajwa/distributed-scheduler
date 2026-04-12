@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     lease_expires_at TIMESTAMPTZ,
     lease_version    INT NOT NULL DEFAULT 0,
     run_timeout_ms   BIGINT NOT NULL DEFAULT 300000,
+    retry_after      TIMESTAMPTZ,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     dispatched_at    TIMESTAMPTZ,
@@ -26,7 +27,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 -- Workers table
 CREATE TABLE IF NOT EXISTS workers (
-    id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id             TEXT PRIMARY KEY,
     tenant_id      TEXT NOT NULL,
     status         TEXT NOT NULL DEFAULT 'ACTIVE',
     address        TEXT NOT NULL,
@@ -43,7 +44,7 @@ CREATE TABLE IF NOT EXISTS workers (
 CREATE TABLE IF NOT EXISTS leases (
     id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     job_id     UUID NOT NULL REFERENCES jobs(id),
-    worker_id  UUID NOT NULL REFERENCES workers(id),
+    worker_id  TEXT NOT NULL REFERENCES workers(id),
     version    INT NOT NULL DEFAULT 1,
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -64,10 +65,42 @@ CREATE TABLE IF NOT EXISTS job_transitions (
 -- Tenant quotas table
 CREATE TABLE IF NOT EXISTS tenant_quotas (
     tenant_id  TEXT PRIMARY KEY,
-    max_jobs   INT NOT NULL DEFAULT 1000,
+    max_jobs      INT NOT NULL DEFAULT 1000,
+    max_schedules INT NOT NULL DEFAULT 50,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Schedules table — recurring jobs
+CREATE TABLE IF NOT EXISTS schedules (
+    id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id      TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    cron_expr      TEXT NOT NULL,
+    payload        TEXT NOT NULL,
+    priority       TEXT NOT NULL DEFAULT 'MEDIUM',
+    max_retries    INT NOT NULL DEFAULT 3,
+    run_timeout_ms BIGINT NOT NULL DEFAULT 300000,
+    enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+    missed_policy  TEXT NOT NULL DEFAULT 'SKIP',
+    last_run_at    TIMESTAMPTZ,
+    next_run_at    TIMESTAMPTZ NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(tenant_id, name)
+);
+
+-- Autopsy reports — forensic analysis of dead-lettered jobs
+CREATE TABLE IF NOT EXISTS autopsy_reports (
+    id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    job_id     UUID NOT NULL REFERENCES jobs(id),
+    tenant_id  TEXT NOT NULL,
+    report     JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_autopsy_job ON autopsy_reports(job_id);
+CREATE INDEX IF NOT EXISTS idx_autopsy_tenant ON autopsy_reports(tenant_id);
 
 -- Indexes for performance
 -- These make queries fast even with millions of jobs
@@ -97,6 +130,13 @@ CREATE INDEX IF NOT EXISTS idx_leases_job
 
 CREATE INDEX IF NOT EXISTS idx_transitions_job
     ON job_transitions(job_id);
+
+CREATE INDEX IF NOT EXISTS idx_schedules_next_run
+    ON schedules(next_run_at)
+    WHERE enabled = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_schedules_tenant
+    ON schedules(tenant_id);
 
 -- Function to auto-update updated_at on jobs
 CREATE OR REPLACE FUNCTION update_updated_at()

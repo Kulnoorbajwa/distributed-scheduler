@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
@@ -20,11 +21,18 @@ func usage() {
 	fmt.Println(`Usage: client <command> [options]
 
 Commands:
-  submit   Submit a new job
-  status   Check job status
-  list     List jobs
-  cancel   Cancel a job
-  demo     Run a full demo (submit multiple jobs, poll status)
+  submit            Submit a new job
+  status            Check job status
+  list              List jobs
+  cancel            Cancel a job
+  autopsy           View autopsy report for a dead-lettered job
+  autopsy-list      List recent autopsy reports
+  schedule-create   Create a recurring schedule
+  schedule-list     List schedules
+  schedule-pause    Pause a schedule
+  schedule-resume   Resume a schedule
+  schedule-delete   Delete a schedule
+  demo              Run a full demo (submit multiple jobs, poll status)
 
 Submit options:
   --payload  JSON payload (required)
@@ -52,6 +60,11 @@ Examples:
   client status --job-id <uuid>
   client list --tenant default
   client cancel --job-id <uuid>
+  client schedule-create --name "hourly" --cron "0 * * * *" --payload '{"type":"shell","command":"echo tick"}'
+  client schedule-list --tenant default
+  client schedule-pause --id <uuid> --tenant default
+  client schedule-resume --id <uuid> --tenant default
+  client schedule-delete --id <uuid> --tenant default
   client demo`)
 }
 
@@ -72,7 +85,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	conn, err := grpc.NewClient("dns:///"+schedulerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var transportCreds grpc.DialOption
+	if os.Getenv("TLS_ENABLED") == "true" {
+		certFile := os.Getenv("TLS_CERT_FILE")
+		if certFile == "" {
+			fmt.Fprintln(os.Stderr, "Error: TLS_CERT_FILE is required when TLS_ENABLED=true")
+			os.Exit(1)
+		}
+		creds, err := credentials.NewClientTLSFromFile(certFile, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load TLS credentials: %v\n", err)
+			os.Exit(1)
+		}
+		transportCreds = grpc.WithTransportCredentials(creds)
+	} else {
+		transportCreds = grpc.WithTransportCredentials(insecure.NewCredentials())
+	}
+
+	conn, err := grpc.NewClient("dns:///"+schedulerAddr, transportCreds)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to connect to scheduler at %s: %v\n", schedulerAddr, err)
 		os.Exit(1)
@@ -95,6 +125,20 @@ func main() {
 		cmdList(ctx, client, os.Args[2:])
 	case "cancel":
 		cmdCancel(ctx, client, os.Args[2:])
+	case "autopsy":
+		cmdAutopsy(ctx, client, os.Args[2:])
+	case "autopsy-list":
+		cmdAutopsyList(ctx, client, os.Args[2:])
+	case "schedule-create":
+		cmdScheduleCreate(ctx, client, os.Args[2:])
+	case "schedule-list":
+		cmdScheduleList(ctx, client, os.Args[2:])
+	case "schedule-pause":
+		cmdScheduleToggle(ctx, client, os.Args[2:], false)
+	case "schedule-resume":
+		cmdScheduleToggle(ctx, client, os.Args[2:], true)
+	case "schedule-delete":
+		cmdScheduleDelete(ctx, client, os.Args[2:])
 	case "demo":
 		cmdDemo(ctx, client)
 	default:
@@ -319,4 +363,182 @@ func cmdDemo(ctx context.Context, client pb.SchedulerServiceClient) {
 		fmt.Println(line)
 	}
 	fmt.Println("\nDemo complete!")
+}
+
+// ─────────────────────────────────────────
+// Autopsy commands (dead letter forensics)
+// ─────────────────────────────────────────
+
+func cmdAutopsy(ctx context.Context, client pb.SchedulerServiceClient, args []string) {
+	jobID := parseFlag(args, "--job-id", "")
+	tenant := parseFlag(args, "--tenant", "default")
+	if jobID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --job-id is required")
+		os.Exit(1)
+	}
+
+	resp, err := client.GetAutopsy(ctx, &pb.GetAutopsyRequest{
+		JobId:    jobID,
+		TenantId: tenant,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Get autopsy failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !resp.Found {
+		fmt.Println("No autopsy report found for this job")
+		os.Exit(1)
+	}
+
+	// Pretty-print the JSON report
+	var pretty json.RawMessage
+	if err := json.Unmarshal([]byte(resp.ReportJson), &pretty); err != nil {
+		fmt.Println(resp.ReportJson)
+		return
+	}
+	formatted, err := json.MarshalIndent(pretty, "", "  ")
+	if err != nil {
+		fmt.Println(resp.ReportJson)
+		return
+	}
+	fmt.Println(string(formatted))
+}
+
+func cmdAutopsyList(ctx context.Context, client pb.SchedulerServiceClient, args []string) {
+	tenant := parseFlag(args, "--tenant", "default")
+	limitStr := parseFlag(args, "--limit", "20")
+	var limit int32
+	fmt.Sscanf(limitStr, "%d", &limit)
+	if limit <= 0 {
+		limit = 20
+	}
+
+	resp, err := client.ListAutopsies(ctx, &pb.ListAutopsiesRequest{
+		TenantId: tenant,
+		Limit:    limit,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "List autopsies failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(resp.Autopsies) == 0 {
+		fmt.Println("No autopsy reports found")
+		return
+	}
+
+	fmt.Printf("%-36s %-36s %-25s\n", "AUTOPSY ID", "JOB ID", "CREATED AT")
+	fmt.Println(strings.Repeat("-", 100))
+	for _, a := range resp.Autopsies {
+		fmt.Printf("%-36s %-36s %-25s\n", a.Id, a.JobId, a.CreatedAt)
+	}
+	fmt.Printf("\nTotal: %d reports\n", len(resp.Autopsies))
+}
+
+// ─────────────────────────────────────────
+// Schedule commands
+// ─────────────────────────────────────────
+
+func cmdScheduleCreate(ctx context.Context, client pb.SchedulerServiceClient, args []string) {
+	name := parseFlag(args, "--name", "")
+	cronExpr := parseFlag(args, "--cron", "")
+	payload := parseFlag(args, "--payload", "")
+	tenant := parseFlag(args, "--tenant", "default")
+	priority := parseFlag(args, "--priority", "MEDIUM")
+	missedPolicy := parseFlag(args, "--missed-policy", "SKIP")
+
+	if name == "" || cronExpr == "" || payload == "" {
+		fmt.Fprintln(os.Stderr, "Error: --name, --cron, and --payload are required")
+		os.Exit(1)
+	}
+
+	resp, err := client.CreateSchedule(ctx, &pb.CreateScheduleRequest{
+		TenantId:     tenant,
+		Name:         name,
+		CronExpr:     cronExpr,
+		Payload:      payload,
+		Priority:     priority,
+		MaxRetries:   3,
+		RunTimeoutMs: 300000,
+		MissedPolicy: missedPolicy,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Create schedule failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Schedule created:\n")
+	fmt.Printf("  ID:     %s\n", resp.ScheduleId)
+	fmt.Printf("  Name:   %s\n", name)
+	fmt.Printf("  Cron:   %s\n", cronExpr)
+	fmt.Printf("  Next:   %s\n", time.UnixMilli(resp.Schedule.NextRunAtMs).Format(time.RFC3339))
+}
+
+func cmdScheduleList(ctx context.Context, client pb.SchedulerServiceClient, args []string) {
+	tenant := parseFlag(args, "--tenant", "default")
+
+	resp, err := client.ListSchedules(ctx, &pb.ListSchedulesRequest{
+		TenantId: tenant,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "List schedules failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(resp.Schedules) == 0 {
+		fmt.Println("No schedules found")
+		return
+	}
+
+	fmt.Printf("%-36s %-20s %-15s %-8s %-7s %s\n",
+		"ID", "NAME", "CRON", "ENABLED", "POLICY", "NEXT RUN")
+	for _, s := range resp.Schedules {
+		nextRun := time.UnixMilli(s.NextRunAtMs).Format("15:04:05")
+		fmt.Printf("%-36s %-20s %-15s %-8v %-7s %s\n",
+			s.Id, s.Name, s.CronExpr, s.Enabled, s.MissedPolicy, nextRun)
+	}
+}
+
+func cmdScheduleToggle(ctx context.Context, client pb.SchedulerServiceClient, args []string, enabled bool) {
+	scheduleID := parseFlag(args, "--id", "")
+	tenant := parseFlag(args, "--tenant", "default")
+
+	if scheduleID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --id is required")
+		os.Exit(1)
+	}
+
+	resp, err := client.ToggleSchedule(ctx, &pb.ToggleScheduleRequest{
+		ScheduleId: scheduleID,
+		TenantId:   tenant,
+		Enabled:    enabled,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Toggle schedule failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println(resp.Message)
+}
+
+func cmdScheduleDelete(ctx context.Context, client pb.SchedulerServiceClient, args []string) {
+	scheduleID := parseFlag(args, "--id", "")
+	tenant := parseFlag(args, "--tenant", "default")
+
+	if scheduleID == "" {
+		fmt.Fprintln(os.Stderr, "Error: --id is required")
+		os.Exit(1)
+	}
+
+	resp, err := client.DeleteSchedule(ctx, &pb.DeleteScheduleRequest{
+		ScheduleId: scheduleID,
+		TenantId:   tenant,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Delete schedule failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println(resp.Message)
 }

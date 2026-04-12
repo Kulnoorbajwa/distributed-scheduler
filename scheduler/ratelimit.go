@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	pb "github.com/Kulnoorbajwa/distributed-scheduler/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -105,6 +106,55 @@ func tenantFromContext(ctx context.Context) string {
 	return tenants[0]
 }
 
+// tenantFromRequest extracts tenant_id from the request body when possible,
+// falling back to the x-tenant-id metadata header. This prevents clients
+// from spoofing a different tenant header to bypass rate limits.
+func tenantFromRequest(ctx context.Context, req interface{}) string {
+	switch r := req.(type) {
+	case *pb.SubmitJobRequest:
+		if r.TenantId != "" {
+			return r.TenantId
+		}
+	case *pb.GetJobRequest:
+		if r.TenantId != "" {
+			return r.TenantId
+		}
+	case *pb.CancelJobClientRequest:
+		if r.TenantId != "" {
+			return r.TenantId
+		}
+	case *pb.ListJobsRequest:
+		if r.TenantId != "" {
+			return r.TenantId
+		}
+	case *pb.CreateScheduleRequest:
+		if r.TenantId != "" {
+			return r.TenantId
+		}
+	case *pb.ListSchedulesRequest:
+		if r.TenantId != "" {
+			return r.TenantId
+		}
+	case *pb.ToggleScheduleRequest:
+		if r.TenantId != "" {
+			return r.TenantId
+		}
+	case *pb.DeleteScheduleRequest:
+		if r.TenantId != "" {
+			return r.TenantId
+		}
+	case *pb.GetAutopsyRequest:
+		if r.TenantId != "" {
+			return r.TenantId
+		}
+	case *pb.ListAutopsiesRequest:
+		if r.TenantId != "" {
+			return r.TenantId
+		}
+	}
+	return tenantFromContext(ctx)
+}
+
 // rateLimitInterceptor returns a gRPC unary interceptor that enforces
 // per-tenant rate limits on client-facing RPCs.
 func rateLimitInterceptor(rl *rateLimiter) grpc.UnaryServerInterceptor {
@@ -119,7 +169,7 @@ func rateLimitInterceptor(rl *rateLimiter) grpc.UnaryServerInterceptor {
 			return handler(ctx, req)
 		}
 
-		tenant := tenantFromContext(ctx)
+		tenant := tenantFromRequest(ctx, req)
 		if !rl.allow(tenant) {
 			return nil, status.Errorf(codes.ResourceExhausted,
 				"rate limit exceeded for tenant %q — try again shortly", tenant)

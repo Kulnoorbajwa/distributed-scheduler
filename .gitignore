@@ -8,6 +8,8 @@ bin/
 # Go
 *.test
 *.out
+coverage.out
+cover.html
 vendor/
 
 # Environment / Secrets

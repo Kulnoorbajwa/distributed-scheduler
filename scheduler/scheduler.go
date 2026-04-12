@@ -15,11 +15,13 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/Kulnoorbajwa/distributed-scheduler/config"
+	"github.com/Kulnoorbajwa/distributed-scheduler/internal/autopsy"
 	"github.com/Kulnoorbajwa/distributed-scheduler/internal/db"
 	"github.com/Kulnoorbajwa/distributed-scheduler/internal/models"
 	pb "github.com/Kulnoorbajwa/distributed-scheduler/proto"
@@ -29,21 +31,23 @@ import (
 // and coordinates workers
 type Scheduler struct {
 	pb.UnimplementedSchedulerServiceServer
-	cfg         *config.Config
-	db          *db.DB
-	jobStore    *db.JobStore
-	workerStore *db.WorkerStore
-	log         *zap.Logger
+	cfg           *config.Config
+	db            *db.DB
+	jobStore      *db.JobStore
+	workerStore   *db.WorkerStore
+	scheduleStore *db.ScheduleStore
+	log           *zap.Logger
 }
 
 // NewScheduler creates a new scheduler instance
 func NewScheduler(cfg *config.Config, database *db.DB, log *zap.Logger) *Scheduler {
 	return &Scheduler{
-		cfg:         cfg,
-		db:          database,
-		jobStore:    db.NewJobStore(database),
-		workerStore: db.NewWorkerStore(database),
-		log:         log,
+		cfg:           cfg,
+		db:            database,
+		jobStore:      db.NewJobStore(database),
+		workerStore:   db.NewWorkerStore(database),
+		scheduleStore: db.NewScheduleStore(database),
+		log:           log,
 	}
 }
 
@@ -87,6 +91,16 @@ func (s *Scheduler) RegisterWorker(ctx context.Context, req *pb.RegisterRequest)
 
 // Heartbeat handles a worker's liveness ping
 func (s *Scheduler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
+	// If worker is draining, mark it so the dispatcher won't send new jobs
+	if req.Status == "DRAINING" {
+		if err := s.workerStore.DrainWorker(ctx, req.WorkerId); err != nil {
+			s.log.Warn("failed to drain worker", zap.String("worker_id", req.WorkerId), zap.Error(err))
+		} else {
+			s.log.Info("worker marked as DRAINING", zap.String("worker_id", req.WorkerId))
+		}
+		return &pb.HeartbeatResponse{Success: true, Message: "DRAINING_ACK"}, nil
+	}
+
 	err := s.workerStore.RecordHeartbeat(ctx, req.WorkerId, int(req.ActiveJobs))
 	if err != nil {
 		// Worker was marked dead — tell it to re-register
@@ -118,9 +132,15 @@ func (s *Scheduler) ReportResult(ctx context.Context, req *pb.JobResultRequest) 
 			jobsCompleted.WithLabelValues("succeeded").Inc()
 		}
 	} else {
-		err = s.jobStore.FailJob(ctx, req.JobId, req.WorkerId, req.ErrorMessage, int(req.LeaseVersion))
+		err = s.jobStore.FailJob(ctx, req.JobId, req.WorkerId, req.ErrorMessage, int(req.LeaseVersion), s.cfg.RetryBaseDelay, s.cfg.RetryMaxDelay)
 		if err == nil {
 			jobsCompleted.WithLabelValues("failed").Inc()
+
+			// Check if the job moved to DEAD_LETTER — if so, generate autopsy
+			job, jobErr := s.jobStore.GetJobByID(ctx, req.JobId)
+			if jobErr == nil && job.Status == models.JobStatusDeadLetter {
+				go s.generateAutopsy(req.JobId)
+			}
 		}
 	}
 
@@ -310,6 +330,256 @@ func (s *Scheduler) ListJobs(ctx context.Context, req *pb.ListJobsRequest) (*pb.
 }
 
 // ─────────────────────────────────────────
+// Schedule RPC handlers (recurring jobs)
+// ─────────────────────────────────────────
+
+// CreateSchedule creates a new recurring job schedule
+func (s *Scheduler) CreateSchedule(ctx context.Context, req *pb.CreateScheduleRequest) (*pb.CreateScheduleResponse, error) {
+	// Validate inputs
+	if req.TenantId == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "tenant_id is required")
+	}
+	if req.Name == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "name is required")
+	}
+	if req.Payload == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "payload is required")
+	}
+
+	// Validate cron expression — rejects sub-minute intervals
+	if err := ValidateCronExpr(req.CronExpr); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid cron expression: %v", err)
+	}
+
+	// Validate payload size
+	if len(req.Payload) > s.cfg.MaxPayloadBytes {
+		return nil, status.Errorf(codes.InvalidArgument, "payload exceeds maximum size of %d bytes", s.cfg.MaxPayloadBytes)
+	}
+
+	// Validate missed policy
+	missedPolicy := models.MissedRunPolicy(req.MissedPolicy)
+	if missedPolicy == "" {
+		missedPolicy = models.MissedRunPolicySkip
+	}
+	switch missedPolicy {
+	case models.MissedRunPolicySkip, models.MissedRunPolicyRunOnce, models.MissedRunPolicyRunAll:
+		// valid
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "invalid missed_policy %q — must be SKIP, RUN_ONCE, or RUN_ALL", req.MissedPolicy)
+	}
+
+	priority := models.JobPriority(req.Priority)
+	if priority == "" {
+		priority = models.JobPriorityMedium
+	}
+
+	maxRetries := int(req.MaxRetries)
+	if maxRetries == 0 {
+		maxRetries = 3
+	}
+
+	runTimeout := time.Duration(req.RunTimeoutMs) * time.Millisecond
+	if runTimeout == 0 {
+		runTimeout = s.cfg.RunTimeout
+	}
+
+	// Compute first next_run_at
+	ce := newCronEvaluator(s.scheduleStore, s.jobStore, s.log)
+	nextRun, err := ce.nextRunTime(req.CronExpr, time.Now())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "failed to compute next run time: %v", err)
+	}
+
+	sched := &models.Schedule{
+		TenantID:     req.TenantId,
+		Name:         req.Name,
+		CronExpr:     req.CronExpr,
+		Payload:      req.Payload,
+		Priority:     priority,
+		MaxRetries:   maxRetries,
+		RunTimeout:   runTimeout,
+		Enabled:      true,
+		MissedPolicy: missedPolicy,
+		NextRunAt:    nextRun,
+	}
+
+	created, err := s.scheduleStore.CreateSchedule(ctx, sched)
+	if err != nil {
+		s.log.Error("failed to create schedule", zap.Error(err))
+		return nil, status.Errorf(codes.Internal, "failed to create schedule: %v", err)
+	}
+
+	s.log.Info("schedule created",
+		zap.String("schedule_id", created.ID),
+		zap.String("name", created.Name),
+		zap.String("cron", created.CronExpr),
+		zap.String("tenant_id", created.TenantID),
+	)
+
+	return &pb.CreateScheduleResponse{
+		Success:    true,
+		ScheduleId: created.ID,
+		Message:    "schedule created",
+		Schedule:   scheduleToProto(created),
+	}, nil
+}
+
+// ListSchedules returns all schedules for a tenant
+func (s *Scheduler) ListSchedules(ctx context.Context, req *pb.ListSchedulesRequest) (*pb.ListSchedulesResponse, error) {
+	if req.TenantId == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "tenant_id is required")
+	}
+
+	schedules, err := s.scheduleStore.ListSchedules(ctx, req.TenantId)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to list schedules")
+	}
+
+	var pbSchedules []*pb.Schedule
+	for _, sched := range schedules {
+		pbSchedules = append(pbSchedules, scheduleToProto(sched))
+	}
+
+	return &pb.ListSchedulesResponse{
+		Schedules: pbSchedules,
+		Message:   "ok",
+	}, nil
+}
+
+// ToggleSchedule enables or disables a schedule
+func (s *Scheduler) ToggleSchedule(ctx context.Context, req *pb.ToggleScheduleRequest) (*pb.ToggleScheduleResponse, error) {
+	if req.ScheduleId == "" || req.TenantId == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "schedule_id and tenant_id are required")
+	}
+
+	if err := s.scheduleStore.ToggleSchedule(ctx, req.ScheduleId, req.TenantId, req.Enabled); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to toggle schedule: %v", err)
+	}
+
+	action := "paused"
+	if req.Enabled {
+		action = "resumed"
+	}
+
+	s.log.Info("schedule toggled",
+		zap.String("schedule_id", req.ScheduleId),
+		zap.String("action", action),
+	)
+
+	return &pb.ToggleScheduleResponse{Success: true, Message: "schedule " + action}, nil
+}
+
+// DeleteSchedule removes a schedule
+func (s *Scheduler) DeleteSchedule(ctx context.Context, req *pb.DeleteScheduleRequest) (*pb.DeleteScheduleResponse, error) {
+	if req.ScheduleId == "" || req.TenantId == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "schedule_id and tenant_id are required")
+	}
+
+	if err := s.scheduleStore.DeleteSchedule(ctx, req.ScheduleId, req.TenantId); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to delete schedule: %v", err)
+	}
+
+	s.log.Info("schedule deleted", zap.String("schedule_id", req.ScheduleId))
+
+	return &pb.DeleteScheduleResponse{Success: true, Message: "schedule deleted"}, nil
+}
+
+// scheduleToProto converts a models.Schedule to a protobuf Schedule
+func scheduleToProto(s *models.Schedule) *pb.Schedule {
+	pbSched := &pb.Schedule{
+		Id:           s.ID,
+		TenantId:     s.TenantID,
+		Name:         s.Name,
+		CronExpr:     s.CronExpr,
+		Payload:      s.Payload,
+		Priority:     string(s.Priority),
+		MaxRetries:   int32(s.MaxRetries),
+		RunTimeoutMs: s.RunTimeout.Milliseconds(),
+		Enabled:      s.Enabled,
+		MissedPolicy: string(s.MissedPolicy),
+		NextRunAtMs:  s.NextRunAt.UnixMilli(),
+	}
+	if s.LastRunAt != nil {
+		pbSched.LastRunAtMs = s.LastRunAt.UnixMilli()
+	}
+	return pbSched
+}
+
+// ─────────────────────────────────────────
+// Autopsy (dead letter forensics)
+// ─────────────────────────────────────────
+
+// generateAutopsy creates a forensic report for a dead-lettered job
+func (s *Scheduler) generateAutopsy(jobID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	report, err := autopsy.GenerateAutopsy(ctx, s.db.Pool, jobID)
+	if err != nil {
+		s.log.Error("failed to generate autopsy", zap.String("job_id", jobID), zap.Error(err))
+		return
+	}
+
+	if err := autopsy.StoreAutopsy(ctx, s.db.Pool, report); err != nil {
+		s.log.Error("failed to store autopsy", zap.String("job_id", jobID), zap.Error(err))
+		return
+	}
+
+	s.log.Info("autopsy generated",
+		zap.String("job_id", jobID),
+		zap.String("probable_cause", report.ProbableCause),
+		zap.Int("attempts", report.TotalAttempts),
+	)
+}
+
+// GetAutopsy returns the autopsy report for a job (tenant-scoped)
+func (s *Scheduler) GetAutopsy(ctx context.Context, req *pb.GetAutopsyRequest) (*pb.GetAutopsyResponse, error) {
+	if req.JobId == "" || req.TenantId == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "job_id and tenant_id are required")
+	}
+
+	autopsyStore := db.NewAutopsyStore(s.db)
+	stored, err := autopsyStore.GetAutopsyByJobID(ctx, req.JobId, req.TenantId)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "autopsy not found: %v", err)
+	}
+
+	return &pb.GetAutopsyResponse{
+		Found:     true,
+		ReportJson: string(stored.Report),
+		Message:   "ok",
+	}, nil
+}
+
+// ListAutopsies returns recent autopsy reports for a tenant
+func (s *Scheduler) ListAutopsies(ctx context.Context, req *pb.ListAutopsiesRequest) (*pb.ListAutopsiesResponse, error) {
+	if req.TenantId == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "tenant_id is required")
+	}
+
+	autopsyStore := db.NewAutopsyStore(s.db)
+	autopsies, err := autopsyStore.ListAutopsies(ctx, req.TenantId, int(req.Limit))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to list autopsies: %v", err)
+	}
+
+	var summaries []*pb.AutopsySummary
+	for _, a := range autopsies {
+		summaries = append(summaries, &pb.AutopsySummary{
+			Id:        a.ID,
+			JobId:     a.JobID,
+			TenantId:  a.TenantID,
+			CreatedAt: a.CreatedAt.Format(time.RFC3339),
+		})
+	}
+
+	return &pb.ListAutopsiesResponse{
+		Autopsies: summaries,
+		Message:   "ok",
+	}, nil
+}
+
+// ─────────────────────────────────────────
 // Background loops
 // ─────────────────────────────────────────
 
@@ -430,7 +700,18 @@ func (s *Scheduler) dispatchToWorker(ctx context.Context, job *models.Job, worke
 		zap.String("address", worker.Address),
 	)
 
-	conn, err := grpc.NewClient("dns:///"+worker.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var transportCreds grpc.DialOption
+	if s.cfg.TLSEnabled {
+		tlsCreds, err := credentials.NewClientTLSFromFile(s.cfg.TLSCertFile, "")
+		if err != nil {
+			s.log.Error("failed to load TLS credentials for worker connection", zap.Error(err))
+			return
+		}
+		transportCreds = grpc.WithTransportCredentials(tlsCreds)
+	} else {
+		transportCreds = grpc.WithTransportCredentials(insecure.NewCredentials())
+	}
+	conn, err := grpc.NewClient("dns:///"+worker.Address, transportCreds)
 	if err != nil {
 		s.log.Error("failed to connect to worker",
 			zap.String("worker_id", worker.ID),
@@ -552,6 +833,16 @@ func main() {
 		log.Fatal("WORKER_TOKEN environment variable is required")
 	}
 
+	// TLS configuration (optional)
+	if os.Getenv("TLS_ENABLED") == "true" {
+		cfg.TLSEnabled = true
+		cfg.TLSCertFile = os.Getenv("TLS_CERT_FILE")
+		cfg.TLSKeyFile = os.Getenv("TLS_KEY_FILE")
+		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
+			log.Fatal("TLS_CERT_FILE and TLS_KEY_FILE are required when TLS_ENABLED=true")
+		}
+	}
+
 	ctx := context.Background()
 	database, err := db.New(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -561,35 +852,92 @@ func main() {
 
 	log.Info("connected to database")
 
-	jobStore := db.NewJobStore(database)
-	count, err := jobStore.ReclaimExpiredJobs(ctx)
-	if err != nil {
-		log.Error("startup reconciliation failed", zap.Error(err))
-	} else {
-		log.Info("startup reconciliation complete", zap.Int("reclaimed", count))
-	}
-
 	scheduler := NewScheduler(cfg, database, log)
 
-	bgCtx, bgCancel := context.WithCancel(ctx)
-	defer bgCancel()
+	// ── Leader election ──
+	// Background loops (dispatch, heartbeat monitor, reconciler, cron) only run
+	// on the leader. All instances serve gRPC RPCs (stateless DB reads/writes).
+	var leaderLoopCtx context.Context
+	var leaderLoopCancel context.CancelFunc
 
-	go scheduler.startHeartbeatMonitor(bgCtx)
-	go scheduler.startReconciler(bgCtx)
-	go scheduler.startDispatcher(bgCtx)
-	go scheduler.startMetricsUpdater(bgCtx)
+	onPromote := func() {
+		// Reclaim expired jobs on promotion (same as old startup reconciliation)
+		reclaimCtx, reclaimCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer reclaimCancel()
+		count, err := scheduler.jobStore.ReclaimExpiredJobs(reclaimCtx)
+		if err != nil {
+			log.Error("promotion reconciliation failed", zap.Error(err))
+		} else if count > 0 {
+			log.Info("promotion reconciliation complete", zap.Int("reclaimed", count))
+		}
 
-	// Prometheus metrics HTTP server
+		leaderLoopCtx, leaderLoopCancel = context.WithCancel(ctx)
+
+		go scheduler.startHeartbeatMonitor(leaderLoopCtx)
+		go scheduler.startReconciler(leaderLoopCtx)
+		go scheduler.startDispatcher(leaderLoopCtx)
+		go scheduler.startMetricsUpdater(leaderLoopCtx)
+
+		cronEval := newCronEvaluator(scheduler.scheduleStore, scheduler.jobStore, log)
+		go cronEval.run(leaderLoopCtx)
+
+		log.Info("leader background loops started")
+	}
+
+	onDemote := func() {
+		if leaderLoopCancel != nil {
+			leaderLoopCancel()
+			leaderLoopCancel = nil
+		}
+		log.Info("leader background loops stopped — operating as standby")
+	}
+
+	elector := NewLeaderElector(database.Pool, log, onPromote, onDemote)
+	go elector.Run(ctx)
+
+	// ── HTTP server (metrics + health) ──
+	// Health endpoints run on ALL instances (leader and standby)
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.Handler())
+
+		// /health — basic liveness: can we reach the database?
+		// Does NOT expose internal error details to avoid information leakage.
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			if err := database.HealthCheck(r.Context()); err != nil {
+				log.Warn("health check failed", zap.Error(err))
+				w.WriteHeader(http.StatusServiceUnavailable)
+				fmt.Fprint(w, `{"status":"unhealthy"}`)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"status":"healthy"}`)
+		})
+
+		// /ready — readiness: are we connected to the DB and able to serve RPCs?
+		// Both leader and standby are "ready" to serve gRPC RPCs.
+		// The response includes leader status for observability.
+		mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+			if err := database.HealthCheck(r.Context()); err != nil {
+				log.Warn("readiness check failed", zap.Error(err))
+				w.WriteHeader(http.StatusServiceUnavailable)
+				fmt.Fprint(w, `{"ready":false,"leader":false}`)
+				return
+			}
+			isLeader := elector.IsLeader()
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"ready":true,"leader":%v}`, isLeader)
+		})
+
 		metricsAddr := fmt.Sprintf(":%d", cfg.MetricsPort)
-		log.Info("metrics server starting", zap.String("address", metricsAddr))
+		log.Info("HTTP server starting (metrics + health)", zap.String("address", metricsAddr))
 		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
-			log.Error("metrics server failed", zap.Error(err))
+			log.Error("HTTP server failed", zap.Error(err))
 		}
 	}()
 
+	// ── gRPC server ──
+	// All instances serve RPCs — they're stateless DB reads/writes.
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.SchedulerPort))
 	if err != nil {
 		log.Fatal("failed to listen", zap.Error(err))
@@ -597,22 +945,38 @@ func main() {
 
 	rl := newRateLimiter(cfg.RateLimitPerSecond, cfg.RateLimitBurst, cfg.RateLimitWindow)
 
-	grpcServer := grpc.NewServer(
+	serverOpts := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(
 			authInterceptor(cfg.APIToken, cfg.WorkerTokenSecret),
 			rateLimitInterceptor(rl),
 		),
-	)
+	}
+
+	if cfg.TLSEnabled {
+		creds, err := credentials.NewServerTLSFromFile(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			log.Fatal("failed to load TLS credentials", zap.Error(err))
+		}
+		serverOpts = append(serverOpts, grpc.Creds(creds))
+		log.Info("TLS enabled for gRPC server")
+	}
+
+	grpcServer := grpc.NewServer(serverOpts...)
 	pb.RegisterSchedulerServiceServer(grpcServer, scheduler)
 
-	log.Info("scheduler starting", zap.Int("port", cfg.SchedulerPort))
+	log.Info("scheduler starting",
+		zap.Int("port", cfg.SchedulerPort),
+		zap.String("mode", "HA — competing for leader lock"),
+	)
 
 	go func() {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 		<-quit
 		log.Info("shutting down scheduler...")
-		bgCancel()
+		if leaderLoopCancel != nil {
+			leaderLoopCancel()
+		}
 		grpcServer.GracefulStop()
 	}()
 

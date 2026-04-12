@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -31,6 +34,7 @@ type Worker struct {
 	workerToken   string
 	cfg           *config.Config
 	log           *zap.Logger
+	mu            sync.Mutex
 	activeJobs    map[string]*runningJob // jobID → running job
 	cancelFuncs   map[string]context.CancelFunc
 }
@@ -85,7 +89,7 @@ func workerAuthInterceptor(workerToken string) grpc.UnaryServerInterceptor {
 			token = token[7:]
 		}
 
-		if token != workerToken {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(workerToken)) != 1 {
 			return nil, status.Errorf(codes.PermissionDenied, "invalid token")
 		}
 
@@ -108,7 +112,9 @@ func (w *Worker) DispatchJob(ctx context.Context, req *pb.DispatchRequest) (*pb.
 	)
 
 	// Check capacity
+	w.mu.Lock()
 	if len(w.activeJobs) >= w.cfg.MaxWorkerCount {
+		w.mu.Unlock()
 		return &pb.DispatchResponse{
 			Accepted: false,
 			Message:  "worker at capacity",
@@ -127,6 +133,7 @@ func (w *Worker) DispatchJob(ctx context.Context, req *pb.DispatchRequest) (*pb.
 		startedAt:    time.Now(),
 	}
 	w.cancelFuncs[job.Id] = cancel
+	w.mu.Unlock()
 
 	// Execute job in background
 	go w.executeJob(jobCtx, job, req.LeaseVersion)
@@ -136,8 +143,10 @@ func (w *Worker) DispatchJob(ctx context.Context, req *pb.DispatchRequest) (*pb.
 
 // CancelJob is called BY the scheduler to cancel a running job
 func (w *Worker) CancelJob(ctx context.Context, req *pb.CancelJobRequest) (*pb.CancelJobResponse, error) {
+	w.mu.Lock()
 	cancel, exists := w.cancelFuncs[req.JobId]
 	if !exists {
+		w.mu.Unlock()
 		return &pb.CancelJobResponse{
 			Success: false,
 			Message: "job not found on this worker",
@@ -148,6 +157,7 @@ func (w *Worker) CancelJob(ctx context.Context, req *pb.CancelJobRequest) (*pb.C
 	cancel()
 	delete(w.activeJobs, req.JobId)
 	delete(w.cancelFuncs, req.JobId)
+	w.mu.Unlock()
 
 	w.log.Info("job cancelled by scheduler", zap.String("job_id", req.JobId))
 
@@ -161,8 +171,10 @@ func (w *Worker) CancelJob(ctx context.Context, req *pb.CancelJobRequest) (*pb.C
 // executeJob runs a job and reports the result back to the scheduler
 func (w *Worker) executeJob(ctx context.Context, job *pb.Job, leaseVersion int32) {
 	defer func() {
+		w.mu.Lock()
 		delete(w.activeJobs, job.Id)
 		delete(w.cancelFuncs, job.Id)
+		w.mu.Unlock()
 	}()
 
 	// Start lease renewal in background
@@ -187,13 +199,52 @@ func (w *Worker) runJob(ctx context.Context, job *pb.Job) error {
 	return w.executePayload(ctx, job.Payload)
 }
 
+// drain notifies the scheduler that this worker is shutting down
+// so no new jobs get dispatched to it.
+func (w *Worker) drain(ctx context.Context) {
+	client, conn, err := w.schedulerClient()
+	if err != nil {
+		w.log.Error("drain: cannot reach scheduler", zap.Error(err))
+		return
+	}
+	defer conn.Close()
+
+	hbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	w.mu.Lock()
+	activeCount := int32(len(w.activeJobs))
+	w.mu.Unlock()
+
+	_, err = client.Heartbeat(w.authCtx(hbCtx), &pb.HeartbeatRequest{
+		WorkerId:   w.id,
+		ActiveJobs: activeCount,
+		Status:     "DRAINING",
+	})
+	if err != nil {
+		w.log.Error("drain: failed to notify scheduler", zap.Error(err))
+	} else {
+		w.log.Info("drain: scheduler notified — worker marked as DRAINING")
+	}
+}
+
 // ─────────────────────────────────────────
 // Scheduler communication
 // ─────────────────────────────────────────
 
 // schedulerClient creates a gRPC connection to the scheduler
 func (w *Worker) schedulerClient() (pb.SchedulerServiceClient, *grpc.ClientConn, error) {
-	conn, err := grpc.NewClient("dns:///"+w.schedulerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var transportCreds grpc.DialOption
+	if w.cfg.TLSEnabled {
+		tlsCreds, err := credentials.NewClientTLSFromFile(w.cfg.TLSCertFile, "")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to load TLS credentials: %w", err)
+		}
+		transportCreds = grpc.WithTransportCredentials(tlsCreds)
+	} else {
+		transportCreds = grpc.WithTransportCredentials(insecure.NewCredentials())
+	}
+	conn, err := grpc.NewClient("dns:///"+w.schedulerAddr, transportCreds)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to scheduler: %w", err)
 	}
@@ -258,9 +309,13 @@ func (w *Worker) sendHeartbeat(ctx context.Context) {
 	hbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
+	w.mu.Lock()
+	activeCount := int32(len(w.activeJobs))
+	w.mu.Unlock()
+
 	resp, err := client.Heartbeat(w.authCtx(hbCtx), &pb.HeartbeatRequest{
 		WorkerId:   w.id,
-		ActiveJobs: int32(len(w.activeJobs)),
+		ActiveJobs: activeCount,
 		Status:     "ACTIVE",
 	})
 
@@ -388,12 +443,9 @@ func main() {
 	cfg := config.Default()
 
 	// Worker identity from environment variables
-	// WORKER_ID must be a valid UUID to match the PostgreSQL schema
 	workerID := os.Getenv("WORKER_ID")
 	if workerID == "" {
 		workerID = uuid.New().String()
-	} else if _, err := uuid.Parse(workerID); err != nil {
-		log.Fatal("WORKER_ID must be a valid UUID", zap.String("worker_id", workerID), zap.Error(err))
 	}
 
 	tenantID := os.Getenv("TENANT_ID")
@@ -436,9 +488,29 @@ func main() {
 		log.Fatal("failed to listen", zap.Error(err))
 	}
 
-	grpcServer := grpc.NewServer(
+	// TLS configuration (optional)
+	if os.Getenv("TLS_ENABLED") == "true" {
+		cfg.TLSEnabled = true
+		cfg.TLSCertFile = os.Getenv("TLS_CERT_FILE")
+		cfg.TLSKeyFile = os.Getenv("TLS_KEY_FILE")
+		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
+			log.Fatal("TLS_CERT_FILE and TLS_KEY_FILE are required when TLS_ENABLED=true")
+		}
+	}
+
+	serverOpts := []grpc.ServerOption{
 		grpc.UnaryInterceptor(workerAuthInterceptor(workerToken)),
-	)
+	}
+	if cfg.TLSEnabled {
+		creds, err := credentials.NewServerTLSFromFile(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			log.Fatal("failed to load TLS credentials", zap.Error(err))
+		}
+		serverOpts = append(serverOpts, grpc.Creds(creds))
+		log.Info("TLS enabled for worker gRPC server")
+	}
+
+	grpcServer := grpc.NewServer(serverOpts...)
 	pb.RegisterWorkerServiceServer(grpcServer, worker)
 
 	log.Info("worker starting",
@@ -447,12 +519,38 @@ func main() {
 		zap.String("scheduler", schedulerAddr),
 	)
 
-	// Graceful shutdown
+	// Graceful shutdown with drain
 	go func() {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 		<-quit
-		log.Info("shutting down worker...")
+		log.Info("shutting down worker — draining active jobs...")
+
+		// Tell scheduler we're draining (no new jobs will be dispatched)
+		worker.drain(context.Background())
+
+		// Wait for active jobs to finish (up to 60 seconds)
+		drainDeadline := time.After(60 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+	drainLoop:
+		for {
+			select {
+			case <-drainDeadline:
+				log.Warn("drain timeout — forcing shutdown with active jobs")
+				break drainLoop
+			case <-ticker.C:
+				worker.mu.Lock()
+				remaining := len(worker.activeJobs)
+				worker.mu.Unlock()
+				if remaining == 0 {
+					log.Info("all jobs drained — shutting down cleanly")
+					break drainLoop
+				}
+				log.Info("waiting for jobs to drain", zap.Int("remaining", remaining))
+			}
+		}
+
 		bgCancel()
 		grpcServer.GracefulStop()
 	}()

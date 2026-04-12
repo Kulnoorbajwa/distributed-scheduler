@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -13,10 +14,16 @@ import (
 // Worker-facing RPCs require the worker token.
 // This maps RPC method names to which token they need.
 var clientRPCs = map[string]bool{
-	"/scheduler.SchedulerService/SubmitJob": true,
-	"/scheduler.SchedulerService/GetJob":    true,
-	"/scheduler.SchedulerService/CancelJob": true,
-	"/scheduler.SchedulerService/ListJobs":  true,
+	"/scheduler.SchedulerService/SubmitJob":       true,
+	"/scheduler.SchedulerService/GetJob":          true,
+	"/scheduler.SchedulerService/CancelJob":       true,
+	"/scheduler.SchedulerService/ListJobs":        true,
+	"/scheduler.SchedulerService/CreateSchedule":  true,
+	"/scheduler.SchedulerService/ListSchedules":   true,
+	"/scheduler.SchedulerService/ToggleSchedule":  true,
+	"/scheduler.SchedulerService/DeleteSchedule":  true,
+	"/scheduler.SchedulerService/GetAutopsy":      true,
+	"/scheduler.SchedulerService/ListAutopsies":   true,
 }
 
 var workerRPCs = map[string]bool{
@@ -61,7 +68,7 @@ func authInterceptor(apiToken, workerToken string) grpc.UnaryServerInterceptor {
 			token = token[7:]
 		}
 
-		if token != requiredToken {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(requiredToken)) != 1 {
 			return nil, status.Errorf(codes.PermissionDenied, "invalid token")
 		}
 

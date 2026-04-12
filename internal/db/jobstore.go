@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Kulnoorbajwa/distributed-scheduler/internal/models"
+	"github.com/Kulnoorbajwa/distributed-scheduler/internal/retry"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -65,7 +66,7 @@ func (s *JobStore) GetJobByID(ctx context.Context, jobID string) (*models.Job, e
 			id, request_id, tenant_id, status, priority,
 			payload, max_retries, retry_count, last_error,
 			assigned_worker, lease_id, lease_expires_at,
-			lease_version, run_timeout_ms,
+			lease_version, run_timeout_ms, retry_after,
 			created_at, updated_at, dispatched_at,
 			started_at, completed_at
 		FROM jobs WHERE id = $1`
@@ -81,7 +82,7 @@ func (s *JobStore) GetJobByRequestID(ctx context.Context, requestID string) (*mo
 			id, request_id, tenant_id, status, priority,
 			payload, max_retries, retry_count, last_error,
 			assigned_worker, lease_id, lease_expires_at,
-			lease_version, run_timeout_ms,
+			lease_version, run_timeout_ms, retry_after,
 			created_at, updated_at, dispatched_at,
 			started_at, completed_at
 		FROM jobs WHERE request_id = $1`
@@ -104,6 +105,7 @@ func (s *JobStore) ClaimNextJob(ctx context.Context, workerID string, leaseDurat
 		WHERE id = (
 			SELECT id FROM jobs
 			WHERE status = 'PENDING'
+			  AND (retry_after IS NULL OR retry_after <= NOW())
 			ORDER BY
 				CASE priority
 					WHEN 'HIGH'   THEN 1
@@ -118,7 +120,7 @@ func (s *JobStore) ClaimNextJob(ctx context.Context, workerID string, leaseDurat
 			id, request_id, tenant_id, status, priority,
 			payload, max_retries, retry_count, last_error,
 			assigned_worker, lease_id, lease_expires_at,
-			lease_version, run_timeout_ms,
+			lease_version, run_timeout_ms, retry_after,
 			created_at, updated_at, dispatched_at,
 			started_at, completed_at`
 
@@ -187,8 +189,8 @@ func (s *JobStore) CompleteJob(ctx context.Context, jobID, workerID string, leas
 	return s.recordTransition(ctx, jobID, models.JobStatusRunning, models.JobStatusSucceeded, workerID, "job completed")
 }
 
-// FailJob marks a job as FAILED and schedules retry if attempts remain
-func (s *JobStore) FailJob(ctx context.Context, jobID, workerID, reason string, leaseVersion int) error {
+// FailJob marks a job as FAILED and schedules retry with exponential backoff if attempts remain
+func (s *JobStore) FailJob(ctx context.Context, jobID, workerID, reason string, leaseVersion int, retryBaseDelay, retryMaxDelay time.Duration) error {
 	query := `
 		UPDATE jobs SET
 			status      = CASE
@@ -199,16 +201,35 @@ func (s *JobStore) FailJob(ctx context.Context, jobID, workerID, reason string, 
 			last_error      = $4,
 			assigned_worker = NULL,
 			lease_id        = NULL,
-			lease_expires_at = NULL
+			lease_expires_at = NULL,
+			retry_after     = CASE
+				WHEN retry_count + 1 >= max_retries THEN NULL
+				ELSE NOW() + $5::interval
+			END
 		WHERE id             = $1
 		  AND assigned_worker = $2
 		  AND lease_version   = $3
 		  AND status IN ('RUNNING', 'DISPATCHED')
 		RETURNING status, retry_count`
 
+	// Pre-compute backoff based on current retry_count (before increment).
+	// We fetch the current retry_count first via the RETURNING clause,
+	// but we need the delay for the SQL. Use a separate query to get retry_count,
+	// or compute optimistically. We'll read retry_count first.
+	var currentRetry int
+	err := s.db.Pool.QueryRow(ctx,
+		`SELECT retry_count FROM jobs WHERE id = $1`, jobID,
+	).Scan(&currentRetry)
+	if err != nil {
+		return fmt.Errorf("failed to read retry count: %w", err)
+	}
+
+	backoff := retry.CalculateBackoff(currentRetry, retryBaseDelay, retryMaxDelay)
+	backoffInterval := fmt.Sprintf("%d seconds", int(backoff.Seconds()))
+
 	var newStatus models.JobStatus
 	var retryCount int
-	err := s.db.Pool.QueryRow(ctx, query, jobID, workerID, leaseVersion, reason).
+	err = s.db.Pool.QueryRow(ctx, query, jobID, workerID, leaseVersion, reason, backoffInterval).
 		Scan(&newStatus, &retryCount)
 	if err == pgx.ErrNoRows {
 		return fmt.Errorf("stale lease: job %s rejected failure from worker %s", jobID, workerID)
@@ -228,7 +249,8 @@ func (s *JobStore) ReclaimExpiredJobs(ctx context.Context) (int, error) {
 			status           = 'PENDING',
 			assigned_worker  = NULL,
 			lease_id         = NULL,
-			lease_expires_at = NULL
+			lease_expires_at = NULL,
+			retry_after      = NULL
 		WHERE status IN ('DISPATCHED', 'RUNNING')
 		  AND lease_expires_at < NOW()
 		RETURNING id`
@@ -279,7 +301,7 @@ func (s *JobStore) ListJobs(ctx context.Context, tenantID string, status *models
 			id, request_id, tenant_id, status, priority,
 			payload, max_retries, retry_count, last_error,
 			assigned_worker, lease_id, lease_expires_at,
-			lease_version, run_timeout_ms,
+			lease_version, run_timeout_ms, retry_after,
 			created_at, updated_at, dispatched_at,
 			started_at, completed_at
 		FROM jobs
@@ -346,6 +368,7 @@ func scanJob(row pgx.Row) (*models.Job, error) {
 		&leaseExpiresAt,
 		&job.LeaseVersion,
 		&runTimeoutMs,
+		&job.RetryAfter,
 		&job.CreatedAt,
 		&job.UpdatedAt,
 		&job.DispatchedAt,

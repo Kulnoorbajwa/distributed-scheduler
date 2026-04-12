@@ -161,6 +161,105 @@ message ListJobsResponse {
 }
 
 // ─────────────────────────────────────────
+// Schedule messages (recurring jobs)
+// ─────────────────────────────────────────
+
+message Schedule {
+  string id             = 1;
+  string tenant_id      = 2;
+  string name           = 3;
+  string cron_expr      = 4;
+  string payload        = 5;
+  string priority       = 6;
+  int32  max_retries    = 7;
+  int64  run_timeout_ms = 8;
+  bool   enabled        = 9;
+  string missed_policy  = 10;
+  int64  last_run_at_ms = 11;
+  int64  next_run_at_ms = 12;
+}
+
+message CreateScheduleRequest {
+  string tenant_id      = 1;
+  string name           = 2;
+  string cron_expr      = 3;
+  string payload        = 4;
+  string priority       = 5;
+  int32  max_retries    = 6;
+  int64  run_timeout_ms = 7;
+  string missed_policy  = 8;
+}
+
+message CreateScheduleResponse {
+  bool     success     = 1;
+  string   schedule_id = 2;
+  string   message     = 3;
+  Schedule schedule    = 4;
+}
+
+message ListSchedulesRequest {
+  string tenant_id = 1;
+}
+
+message ListSchedulesResponse {
+  repeated Schedule schedules = 1;
+  string            message   = 2;
+}
+
+message ToggleScheduleRequest {
+  string schedule_id = 1;
+  string tenant_id   = 2;
+  bool   enabled     = 3;
+}
+
+message ToggleScheduleResponse {
+  bool   success = 1;
+  string message = 2;
+}
+
+message DeleteScheduleRequest {
+  string schedule_id = 1;
+  string tenant_id   = 2;
+}
+
+message DeleteScheduleResponse {
+  bool   success = 1;
+  string message = 2;
+}
+
+// ─────────────────────────────────────────
+// Autopsy messages (dead letter forensics)
+// ─────────────────────────────────────────
+
+message GetAutopsyRequest {
+  string job_id    = 1;
+  string tenant_id = 2;
+}
+
+message GetAutopsyResponse {
+  bool   found       = 1;
+  string report_json = 2; // full JSON autopsy report
+  string message     = 3;
+}
+
+message ListAutopsiesRequest {
+  string tenant_id = 1;
+  int32  limit     = 2;
+}
+
+message AutopsySummary {
+  string id         = 1;
+  string job_id     = 2;
+  string tenant_id  = 3;
+  string created_at = 4;
+}
+
+message ListAutopsiesResponse {
+  repeated AutopsySummary autopsies = 1;
+  string                  message   = 2;
+}
+
+// ─────────────────────────────────────────
 // Service definitions
 // ─────────────────────────────────────────
 
@@ -183,4 +282,14 @@ service SchedulerService {
   rpc GetJob(GetJobRequest)            returns (GetJobResponse);
   rpc CancelJob(CancelJobClientRequest) returns (CancelJobClientResponse);
   rpc ListJobs(ListJobsRequest)        returns (ListJobsResponse);
+
+  // Schedule calls (recurring jobs)
+  rpc CreateSchedule(CreateScheduleRequest)   returns (CreateScheduleResponse);
+  rpc ListSchedules(ListSchedulesRequest)     returns (ListSchedulesResponse);
+  rpc ToggleSchedule(ToggleScheduleRequest)   returns (ToggleScheduleResponse);
+  rpc DeleteSchedule(DeleteScheduleRequest)   returns (DeleteScheduleResponse);
+
+  // Autopsy calls (dead letter forensics)
+  rpc GetAutopsy(GetAutopsyRequest)           returns (GetAutopsyResponse);
+  rpc ListAutopsies(ListAutopsiesRequest)     returns (ListAutopsiesResponse);
 }
